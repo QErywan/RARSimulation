@@ -5,3 +5,4 @@ plot.py
 data/
 results/
 compressors/countsketch/csh
+.DS_Store
