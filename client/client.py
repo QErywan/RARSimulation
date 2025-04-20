@@ -126,7 +126,6 @@ class Client:
     ###############################################################
     
     def update_net(self, acc_grad):
-        # Update the network with accumulated gradients
 
         acc_grad /= self.num_clients # Average the gradients
             
@@ -231,7 +230,6 @@ class Client:
             self.train_correct += predicted.eq(client_targets).sum().item()
         
         self.train_loss /= get_loop(steps)
-        # self.optimiser.zero_grad()
 
         self.prepare_gradients()
 
@@ -257,19 +255,11 @@ class Client:
         if self.compression_scheme == 'chunk_topk_recompress':
             return self.compressor.compress_chunk(self.curr_gradient_chunks[pos], self.k_value)
         else:
-            # print(self.curr_gradient_chunks)
             return self.curr_gradient_chunks[pos]
     
     def get_gradients_from_indices(self, indices):
         return self.unsketched_gradient[indices]
     
-    # def scatter_send(self, round):
-    #     chunk = self.curr_gradient_chunks[(self.client_id - round) % self.num_clients]
-    #     if self.compression_scheme == 'ltopk':
-    #         return self.compressor.compress(chunk)
-    #     else:
-    #         return chunk
-
     def get_gradient(self):
         # Build the gradient vector from all parameters
         clients_grad_vec = []
@@ -299,22 +289,17 @@ class Client:
             return vec
         elif self.compression_scheme in ['csh', 'cshtopk_actual', 'cshtopk_estimate']:
             data["d"] = int(vec.numel())
-            # data["c"] = int(vec.numel() / (32 / nbits))
-            data["c"] = self.sketch_col #CHANGE
+            data["c"] = self.sketch_col 
             data["r"] = self.sketch_row
         
         return self.compressor.compress(data)
 
     ###############################################################
-    #                 Training Statistics                       #
+    #                   Testing & Parameter Access              #
     ###############################################################
 
     def get_train_stats(self):
         return self.train_loss, self.train_correct, self.train_total
-
-    ###############################################################
-    #                   Testing & Parameter Access              #
-    ###############################################################
 
     def test_model(self):
         test_correct = 0

@@ -37,54 +37,29 @@ if __name__ == '__main__':
     #######   Arguments   ######
     ############################ 
 
-    '''
-        - ratio between k and size of sketch
-        - size of sketch may be a parameter as well
+    seed = 123                                  # random seed for reproducibility
+    gpu = 0                                     # GPU ID to use (0 for first GPU, -1 for CPU)
+    num_rounds = 7000                           # number of communication rounds
+    num_clients = 4                             # number of clients
+    test_every = 40                             # test every X rounds
+    lr = 0.01                                   # learning rate for the model
+    lr_type = 'const'                           # learning rate type ['const', 'step_decay', 'exp_decay']
+    client_train_steps = 1                      # local training steps per client
+    client_batch_size = 128                     # Batch size of a client (for both train and test)
+    net = 'ResNet9'                             # CNN model to use
+    dataset = 'CIFAR10'                         # dataset to use
+    error_feedback = False                      # -- to be implemented --
+    nbits = 1.0                                 # Number of bits per coordinate for compression scheme
+    compression_scheme = 'chunk_topk_single'    # compression/decompression scheme ['none', 'vector_topk', 'chunk_topk_recompress', 'chunk_topk_single', 
+                                                #                                   'csh', 'cshtopk_actual', 'cshtopk_estimate']
+    sketch_col = 180000                         # number of columns for the sketch matrix
+    sketch_row = 1                              # number of rows for the sketch matrix
+    k = 25000                                   # top-k k value for any compression scheme  
+    data_per_client = 'sequential'              # data distribution scheme ['sequential', 'label_per_client']
+    folder = 'ringallreduce'                    # folder to save the results
 
 
-
-    '''
-
-
-    seed = 123
     
-    gpu = 0
-    
-    num_rounds = 7000
-    
-    num_clients = 4
-    
-    test_every = 40
-    
-    lr = 0.01
-
-    lr_type = 'const' # learning rate type ['const', 'step_decay', 'exp_decay']
-
-    client_train_steps = 1 # local training steps per client
-
-    client_batch_size = 128 # Batch size of a client (for both train and test)
-    
-    # net = 'ComEffFlPaperCnnModel'
-    net = 'ResNet9'
-
-    dataset = 'CIFAR10'
-
-    error_feedback = False # not implemented
-
-    nbits = 1.0 # Number of bits per coordinate for compression scheme
-    
-    compression_scheme = 'cshtopk_actual' # compression/decompression scheme ['none', 'vector_topk', 'chunk_topk_recompress', 'chunk_topk_single', 'csh', 'cshtopk_actual', 'cshtopk_estimate']
-    
-    # can change ratio to compare different experiments to test at the same latency/bandwidth
-    sketch_col = 180000
-    sketch_row = 1
-
-    k = 100000 # top-k k value for any compression scheme
-
-    data_per_client = 'sequential'
-
-    folder = 'ringallreduce'
-
     args_for_suffix = {
         'rounds': num_rounds,
         'dataset': dataset,
@@ -135,8 +110,6 @@ if __name__ == '__main__':
     print('==> Initializing ...')
 
     clients = {}
-    
-    # global_decompressor = CountSketchReceiver(device=device)
 
 
     for client_id in range(num_clients):
@@ -165,8 +138,10 @@ if __name__ == '__main__':
         'trainACCs': [],
         'testACCs': [],
         'cumulative_bandwidth': [],
-        'cumulative_latency': []
-        # more to be added
+        'cumulative_latency': [],
+        'latency': [],
+        'scatter_total_sent': [],
+        'gather_total_sent': [],
     }
 
     if not os.path.isdir('results'):
@@ -175,7 +150,10 @@ if __name__ == '__main__':
     if not os.path.isdir('results/{}'.format(folder)):
         os.mkdir('results/{}'.format(folder))
 
+    ##################################################
+    ##################################################
     # Initial initialisation of global gradients
+
     if compression_scheme in ['csh', 'cshtopk_actual', 'cshtopk_estimate']:
         zeros_tensor = torch.zeros(clients[0].pytorch_total_params, device=device)
         data = {}
@@ -190,6 +168,9 @@ if __name__ == '__main__':
     else:
         zeros_tensor = torch.zeros(int((clients[0].pytorch_total_params)), device=device)
         global_gradients = list(torch.chunk(zeros_tensor, num_clients))
+
+    ##################################################
+    ##################################################
     
     clients_per_round = range(num_clients)
         
@@ -215,7 +196,6 @@ if __name__ == '__main__':
 
 
     for round in range(start_round + 1, start_round + 1 + num_rounds):
-        # Initialize counters and record start time
         scatter_data_sent = 0
         scatter_sending_rounds = 0
         
@@ -224,14 +204,11 @@ if __name__ == '__main__':
         gather_data_sent = 0
         gather_sending_rounds = 0
 
-        
-        
         start_time = time.time()
 
-        # Prepare updated parameters
         updated_param = torch.cat(global_gradients) if isinstance(global_gradients, list) else global_gradients
 
-        # Reset global gradients based on the compression scheme
+        # Update global gradients with the updated parameters
         if compression_scheme in ['csh', 'cshtopk_actual', 'cshtopk_estimate']:
             zeros_tensor = torch.zeros(clients[0].pytorch_total_params, device=device)
             data = {}
@@ -252,9 +229,9 @@ if __name__ == '__main__':
             clients[client_id].update_net(updated_param)
             clients[client_id].train(round, client_train_steps)
 
-        # Scatter rounds: accumulate gradients and track data usage
+
+        # Reduce-Scatter (+ AllGather)
         for scatter_round in range(num_clients):
-            # Calculate data sent and maximum data in the current scatter round
             for chunk in global_gradients:
                 data = np.count_nonzero(chunk.cpu())
                 scatter_data_sent += data
@@ -264,13 +241,12 @@ if __name__ == '__main__':
             max_data_sent.append(max_data)
             scatter_sending_rounds += 1
 
-            # Distribute and accumulate gradients from clients
             for client_id in clients_per_round:
                 chunk_index = (client_id - scatter_round) % num_clients
                 gradient_chunk = clients[client_id].get_gradient_chunk(chunk_index)
                 global_gradients[chunk_index] += gradient_chunk
         
-        # Gather round to count data sent
+        # AllGather Data Sent
         for chunk in global_gradients:
             data = np.count_nonzero(chunk.cpu()) * (num_clients-1)
             gather_data_sent += data
@@ -279,7 +255,11 @@ if __name__ == '__main__':
         
 
 
+        ########################################################
+        ########################################################
+
         # Special handling for the 'cshtopk_actual' compression scheme
+
         if compression_scheme == 'cshtopk_actual':
             global_gradients = torch.cat(global_gradients)
             global_sketch['vec'] = global_gradients
@@ -302,6 +282,7 @@ if __name__ == '__main__':
                 max_data = max(max_data, data)
 
         # Special handling for the 'cshtopk_estimate' compression scheme
+
         if compression_scheme == 'cshtopk_estimate':
             global_gradients = torch.cat(global_gradients)
             global_sketch['vec'] = global_gradients
@@ -317,14 +298,16 @@ if __name__ == '__main__':
             gather_data_sent += np.count_nonzero(top_k_gradients.cpu()) * (num_clients-1)
             
             global_gradients = top_k_gradients
+        
+        ########################################################
+        ########################################################
 
-            # print(global_gradients)
         
         total_data_sent_gather.append(gather_data_sent)
         max_data_sent.append(max_data)
         gather_sending_rounds += num_clients-1
 
-        # Update training statistics for each client
+
         for client_id in clients_per_round:
             client_train_loss, client_train_correct, client_train_total = clients[client_id].get_train_stats()
             train_loss.append(client_train_loss)
@@ -333,7 +316,6 @@ if __name__ == '__main__':
 
         end_time = time.time()
 
-        # Calculate current metrics
         curr_train_loss = sum(train_loss[-100:]) / (len(clients_per_round) * 100)
         train_acc = 100. * sum(train_correct[-100:]) / sum(train_total[-100:])
 
@@ -351,7 +333,6 @@ if __name__ == '__main__':
             cumulative_bandwidth += bandwidth_scatter + bandwidth_gather
             cumulative_latency += latency
 
-        # Test the model at specified intervals
         if round % test_every == 0:
             model_test_accuracy, model_test_correct, model_test_total = clients[0].test_model()
             results['rounds'].append(round)
@@ -363,79 +344,13 @@ if __name__ == '__main__':
             results['scatter_total_sent'] = total_data_sent_scatter
             results['gather_total_sent'] = total_data_sent_gather
 
-        # Update progress bar with the latest metrics
+
         kbar.update(round, values=[
             ("train accuracy", train_acc),
             ("test accuracy", model_test_accuracy),
             ("Bandwidth", bandwidth_scatter),
             ("Latency", latency)
         ])
-
-        # - Can use some visualisation to show variations across round
-
-    # plt.figure(figsize=(10, 5))
-
-    # # Plot Cumulative Bandwidth vs Accuracy
-    # plt.plot(results['cumulative_bandwidth'], results['testACCs'], label="Cumulative Bandwidth", marker='o', linestyle='-')
-    # plt.ylabel("Test Accuracy (%)")
-    # plt.xlabel("Cumulative Bandwidth (bytes)")
-    # plt.title("Bandwidth Required to Reach Accuracy")
-    # plt.legend()
-    # plt.grid(True)
-    # # plt.savefig(f"{plot_folder}/cumulative_bandwidth_vs_accuracy.png")
-    # plt.show()
-
-
-
-    # # Plot Training and Test Accuracy
-    # plt.figure(figsize=(10, 5))
-    # plt.plot(results['rounds'], results['trainACCs'], label="Train Accuracy", marker='o', linestyle='-')
-    # plt.plot(results['rounds'], results['testACCs'], label="Test Accuracy", marker='s', linestyle='--')
-    # plt.xlabel("Rounds")
-    # plt.ylabel("Accuracy (%)")
-    # plt.title("Training vs Test Accuracy Over Time")
-    # plt.legend()
-    # plt.grid(True)
-    # plt.show()
-
-    # # Compute Bandwidth and Latency statistics over test intervals
-    # bandwidth_usage_scatter = [sum(total_data_sent_scatter[i:i+test_every]) / test_every for i in range(0, len(total_data_sent_scatter), test_every)]
-    # bandwidth_usage_gather = [sum(total_data_sent_gather[i:i+test_every]) / test_every for i in range(0, len(total_data_sent_gather), test_every)]
-    # latency_usage = [sum(max_data_sent[i:i+test_every]) / test_every for i in range(0, len(max_data_sent), test_every)]
-
-    # test_intervals_scatter = list(range(0, len(bandwidth_usage_scatter) * test_every, test_every))
-    # test_intervals_gather = list(range(0, len(bandwidth_usage_gather) * test_every, test_every))
-    # test_intervals_both = list(range(0, len(bandwidth_usage_gather)+len(bandwidth_usage_scatter) * test_every, test_every))
-
-    # # Plot Bandwidth Usage
-    # plt.figure(figsize=(10, 5))
-    # plt.plot(test_intervals_scatter, bandwidth_usage_scatter, label="Bandwidth Usage (Scatter)", marker='o', linestyle='-', color='r')
-    # plt.xlabel("Rounds")
-    # plt.ylabel("Bandwidth Usage (bytes)")
-    # plt.title("Bandwidth Usage Over Training Rounds")
-    # plt.legend()
-    # plt.grid(True)
-    # plt.show()
-
-    # plt.figure(figsize=(10, 5))
-    # plt.plot(test_intervals_gather, bandwidth_usage_gather, label="Bandwidth Usage (Gather)", marker='o', linestyle='-', color='r')
-    # plt.xlabel("Rounds")
-    # plt.ylabel("Bandwidth Usage (bytes)")
-    # plt.title("Bandwidth Usage Over Training Rounds")
-    # plt.legend()
-    # plt.grid(True)
-    # plt.show()
-
-    # # Plot Latency
-    # plt.figure(figsize=(10, 5))
-    # plt.plot(test_intervals_both, latency_usage, label="Latency", marker='s', linestyle='-', color='g')
-    # plt.xlabel("Rounds")
-    # plt.ylabel("Latency (units)")
-    # plt.title("Latency Over Training Rounds")
-    # plt.legend()
-    # plt.grid(True)
-    # plt.show()
-
 
     
 
@@ -446,9 +361,9 @@ if __name__ == '__main__':
     suffix = get_suffix(args_for_suffix)
 
     try :
-        torch.save(data, './results/' + folder + '/' + compression_scheme + '/' + 'exp_' + suffix + '.pt')
+        torch.save(data, './results/' + folder + '/' + compression_scheme + '/' + 'results_' + suffix + '.pt')
     except:    
-        torch.save(data, './results/' + folder + '/' + 'exp_' + suffix + '.pt')
+        torch.save(data, './results/' + folder + '/' + 'results_' + suffix + '.pt')
     
 
     
