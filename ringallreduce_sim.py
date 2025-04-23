@@ -3,13 +3,10 @@ import random
 import numpy as np
 import torch
 import os
-import argparse
 import pkbar
 import time
 from defs import get_device
 import math
-
-import matplotlib.pyplot as plt
 
 
 from client.dataset_factories import datasets
@@ -269,7 +266,8 @@ if __name__ == '__main__':
             top_k_gradients = torch.zeros(clients[0].pytorch_total_params, device=device)
             
             for client_id in clients:
-                top_k_gradients[top_k_indices] += clients[client_id].get_gradients_from_indices(top_k_indices)
+                top_k_gradients[top_k_indices] += \
+                    clients[client_id].get_gradients_from_indices(top_k_indices)
             
             gather_data_sent += k * (num_clients-1)
 
